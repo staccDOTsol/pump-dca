@@ -13,16 +13,17 @@ import {
 import { IDL } from '../../target/types/dca_integration';
 import {
   NATIVE_MINT,
+  createAssociatedTokenAccountInstruction,
   createSyncNativeInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
 import { deriveEscrow, getOrCreateATAInstruction } from './helpers';
 import { Decimal } from 'decimal.js';
 
-const RPC = process.env.RPC || 'https://api.devnet.solana.com';
+const RPC = process.env.RPC || 'https://rpc.ironforge.network/mainnet?apiKey=01HRZ9G6Z2A19FY8PR4RF4J4PW';
 const connection = new Connection(RPC);
 
-const programId = new PublicKey('5mrhiqFFXyfJMzAJc5vsEQ4cABRhfsP7MgSVgGQjfcrR');
+const programId = new PublicKey('3nD2C2UJCUa8WX9UtoDEAycFTXNS86dWVw4qRy2raKRD');
 const provider = new AnchorProvider(
   connection,
   {} as any,
@@ -33,18 +34,41 @@ const program = new Program(IDL, programId, provider);
 const dcaClient = new DCA(connection, Network.MAINNET);
 
 const user = Keypair.fromSecretKey(
-  new Uint8Array(JSON.parse(process.env.USER_PRIVATE_KEY!)),
+  new Uint8Array(JSON.parse(
+    require('fs').readFileSync('/Users/jarettdunn/new.json', 'utf8')
+  )),
 );
 
 const usdcMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
-const bonkMint = new PublicKey('DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263');
+const bonkMint = new PublicKey('BQpGv6LVWG1JRm1NdjerNSFdChMdAULJr3x9t2Swpump');
 
 const inputMint = NATIVE_MINT;
 const inputMintAmount = new Decimal('0.1').mul(LAMPORTS_PER_SOL);
 
 const outputMint = bonkMint;
-
+const outputMints = [
+  "v62Jv9pwMTREWV9f6TetZfMafV254vo99p7HSF25BPr",
+  "CaLyryATQhnVZaau425zAJ9fNf4uNWVa1GKD6JN94AX9",
+  "34b3pMvjMC8s1R6dNEEKRn2WSRbo9BB1v9hDKzeSDgEC",
+  "HgUBLLQW8UULiZ58tfrtzMUTReARyX1MPFK3kBTo4VBQ",
+  "Dvmw8Nq6SRoxFWP36PWRycuY8NfT7qHHGa7k3wPTbWWD","StaccN8ycAamAmZgijj9B7wKHwUEF17XN3vrNx1pQ6Z",
+  "BQpGv6LVWG1JRm1NdjerNSFdChMdAULJr3x9t2Swpump","A85U2m49Y4VY9qxyqaStrLX9LaJZKwLxJK85WKNHVRg8"
+].map(mint => new PublicKey(mint));
+for (const outputMint of outputMints) {
+  // First send 1 SOL to heehee PDA
+  const [heehee] = PublicKey.findProgramAddressSync(
+    [Buffer.from("heehee"), outputMint.toBuffer()],
+  programId
+);
+console.log(heehee);
+}
+for (const outputMint of outputMints) { 
+  const [heehee] = PublicKey.findProgramAddressSync(
+    [Buffer.from("heehee"), outputMint.toBuffer()],
+  programId
+);
+console.log(heehee);
 async function setupDCA(
   userInTokenAccount: PublicKey,
   inputMint: PublicKey,
@@ -70,10 +94,19 @@ async function setupDCA(
 
   const preInstructions: TransactionInstruction[] = [
     ComputeBudgetProgram.setComputeUnitLimit({
-      units: 500_000,
+      units: 1_400_000,
     }),
+    ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 3333333,
+    }),
+    await createAssociatedTokenAccountInstruction(
+      user.publicKey,
+      getAssociatedTokenAddressSync(outputMint, escrow, true), 
+      escrow,
+      outputMint
+    )
   ];
-
+/*
   if (inputMint.equals(NATIVE_MINT)) {
     const { ataPubKey, ix } = await getOrCreateATAInstruction(
       connection,
@@ -92,7 +125,7 @@ async function setupDCA(
     }
     preInstructions.push(transferIx);
     preInstructions.push(syncNativeIX);
-  }
+  }*/
 
   console.log({
     user: user.publicKey,
@@ -110,7 +143,7 @@ async function setupDCA(
     inputMint: inputMint,
     outputMint: outputMint,
   });
-
+const escrowInAta = Keypair.generate();
   const tx = await program.methods
     .setupDca(
       uid,
@@ -123,25 +156,26 @@ async function setupDCA(
     )
     .accounts({
       user: user.publicKey,
-      userTokenAccount: userInTokenAccount,
       jupDcaProgram: DCA_PROGRAM_ID_BY_CLUSTER['mainnet-beta'],
       jupDca: dcaPubKey,
+      heehee,
+      escrowInAta: escrowInAta.publicKey,
       jupDcaInAta: getAssociatedTokenAddressSync(inputMint, dcaPubKey, true),
       jupDcaOutAta: getAssociatedTokenAddressSync(outputMint, dcaPubKey, true),
       jupDcaEventAuthority: new PublicKey(
         'Cspp27eGUDMXxPEdhmEXFVRn6Lt1L7xJyALF3nmnWoBj',
       ),
       escrow,
-      escrowInAta: getAssociatedTokenAddressSync(inputMint, escrow, true),
       escrowOutAta: getAssociatedTokenAddressSync(outputMint, escrow, true),
       inputMint: inputMint,
       outputMint: outputMint,
     })
+    .signers([escrowInAta])
     .preInstructions(preInstructions)
     .transaction();
 
   try {
-    const txHash = await sendAndConfirmTransaction(connection, tx, [user], {
+    const txHash = await sendAndConfirmTransaction(connection, tx, [user, escrowInAta], {
       skipPreflight: false,
     });
     console.log('Created DCA Escrow: ', { txHash, dcaPubKey, escrow });
@@ -164,11 +198,6 @@ async function close(
       inputMint,
       outputMint,
       user: user.publicKey,
-      userTokenAccount: getAssociatedTokenAddressSync(
-        outputMint,
-        user.publicKey,
-        false,
-      ),
       escrow,
       dca,
       escrowInAta: getAssociatedTokenAddressSync(inputMint, escrow, true),
@@ -220,19 +249,48 @@ async function findByUser(user: PublicKey) {
 
 // Close completed escrows by user
 async function main() {
+  /*
+
+  const transferToHeeheeIx = web3.SystemProgram.transfer({
+    fromPubkey: user.publicKey,
+    toPubkey: heehee,
+    lamports: LAMPORTS_PER_SOL
+  });
+
+  const transferTx = await sendAndConfirmTransaction(
+    connection,
+    new web3.Transaction().add(
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 20000,
+      }),
+      transferToHeeheeIx,
+    ),
+    [user]
+  );
+  console.log('Transferred 1 SOL to heehee:', transferTx);
+  */
+  // Then setup DCA
+  await setupDCA(
+    getAssociatedTokenAddressSync(inputMint, user.publicKey, true),
+    inputMint,
+    outputMint,
+    LAMPORTS_PER_SOL.toString(),
+    (LAMPORTS_PER_SOL / 100).toString(), // Split into 100 parts
+    '3600' // Every hour
+  );
   const escrows = await findByUser(new PublicKey(user.publicKey));
 
   for (const escrow of escrows) {
     if (
       !escrow.account.completed &&
       (await connection.getBalance(escrow.account.dca)) === 0
-    ) {
+    ) {/*
       await close(
         escrow.account.dca,
         escrow.publicKey,
         escrow.account.inputMint,
         escrow.account.outputMint,
-      );
+      );*/
     }
   }
 }
@@ -283,3 +341,5 @@ async function main() {
 // }
 
 main();
+
+}

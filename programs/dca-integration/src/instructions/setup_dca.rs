@@ -1,11 +1,17 @@
+use std::str::FromStr;
+
 use crate::constants::ESCROW_SEED;
 use crate::{escrow_seeds, state::Escrow};
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::system_program::{transfer, Transfer as SystemTransfer};
+use anchor_spl::token::spl_token::native_mint;
 use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount, Transfer},
 };
 use jupiter_dca::cpi::{self};
+use solana_program::program::invoke;
 
 #[derive(Accounts)]
 #[instruction(application_idx: u64)]
@@ -27,19 +33,14 @@ pub struct SetupDca<'info> {
 
     /// CHECK: Jup DCA will check
     jup_dca_event_authority: UncheckedAccount<'info>,
-
+    #[account(address = native_mint::ID)]
     input_mint: Box<Account<'info, Mint>>,
+ 
+
     output_mint: Box<Account<'info, Mint>>,
 
     #[account(mut)]
     user: Signer<'info>,
-
-    #[account(
-        mut,
-        token::authority=user,
-        token::mint=input_mint,
-    )]
-    user_token_account: Box<Account<'info, TokenAccount>>,
 
     #[account(
       init,
@@ -50,64 +51,151 @@ pub struct SetupDca<'info> {
     )]
     escrow: Box<Account<'info, Escrow>>,
 
-    #[account(
-      init,
-      payer=user,
-      associated_token::authority=escrow,
-      associated_token::mint=input_mint,
+    #[account(mut,
+        seeds = [b"heehee", output_mint.key().as_ref()],
+        bump
     )]
-    escrow_in_ata: Box<Account<'info, TokenAccount>>,
+    heehee: SystemAccount<'info>,
 
-    #[account(
-      init,
-      payer=user,
-      associated_token::authority=escrow,
-      associated_token::mint=output_mint,
+    #[account(mut
+    )]
+    escrow_in_ata: Signer<'info>,
+
+    #[account(mut
     )]
     escrow_out_ata: Box<Account<'info, TokenAccount>>,
 
     system_program: Program<'info, System>,
     token_program: Program<'info, Token>,
     associated_token_program: Program<'info, AssociatedToken>,
+    rent: Sysvar<'info, Rent>,
 }
 
 pub fn setup_dca(
     ctx: Context<SetupDca>,
     application_idx: u64,
-    in_amount: u64,
-    in_amount_per_cycle: u64,
-    cycle_frequency: i64,
+    _in_amount: u64,
+    _in_amount_per_cycle: u64,
+    _cycle_frequency: i64,
     min_out_amount: Option<u64>,
     max_out_amount: Option<u64>,
     start_at: Option<i64>,
 ) -> Result<()> {
-    msg!("Transfer from user");
-    anchor_spl::token::transfer(
-        CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.user_token_account.to_account_info(),
-                to: ctx.accounts.escrow_in_ata.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        ),
-        in_amount,
+    msg!("Unwrap native SOL from escrow in ata to wrapped SOL");
+    let binding = application_idx.to_le_bytes();
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        ESCROW_SEED,
+        ctx.accounts.user.to_account_info().key.as_ref(),
+        ctx.accounts.input_mint.to_account_info().key.as_ref(),
+        ctx.accounts.output_mint.to_account_info().key.as_ref(),
+        binding.as_ref(),
+        &[ctx.bumps["escrow"]]
+    ]];
+    msg!("bruh transfer the lamports from heehee to escrow in ata");
+    
+    msg!("Getting rent-exempt minimum for heehee account");
+    let rent = Rent::get()?;
+    let min_rent = rent.minimum_balance(0);
+    
+    msg!("Calculating transferable lamports, leaving {} for rent-exemption", min_rent);
+    let lamport_ss = ctx.accounts.heehee.lamports()
+        .checked_sub(min_rent)
+        .ok_or(ErrorCode::InvalidProgramExecutable)?;  // Changed error type to be more specific
+    
+    // Add minimum amount check
+    require!(lamport_ss >= 100, ErrorCode::InvalidProgramExecutable);  // Ensure we have enough for at least 100 cycles
+    
+    msg!("Initializing escrow_in_ata");
+
+    let heehee   = &mut ctx.accounts.heehee.to_account_info();
+    let escrow_in_ata = &mut &mut ctx.accounts.escrow_in_ata.to_account_info();
+    let user = &mut ctx.accounts.user.to_account_info();
+
+    let heehee_signer_seeds: &[&[&[u8]]] = &[&[
+        b"heehee",
+        ctx.accounts.output_mint.to_account_info().key.as_ref(),
+        &[ctx.bumps["heehee"]]
+    ]];
+    msg!("Creating escrow_in_ata account");
+    let create_account_ix = solana_program::system_instruction::create_account(
+        &ctx.accounts.heehee.key(),
+        &escrow_in_ata.key(),
+        min_rent,
+        165, // Token account size
+        &anchor_spl::token::ID
+    );
+    invoke_signed(
+        &create_account_ix,
+        &[
+            heehee.clone(),
+            escrow_in_ata.clone(),
+        ],
+        heehee_signer_seeds
+    )?;
+    
+    msg!("transferring lamports from user to escrow_in_ata");
+
+    transfer(CpiContext::new_with_signer(ctx.accounts.system_program.to_account_info(),
+    SystemTransfer {
+        from: heehee.clone(),
+        to: escrow_in_ata.clone(),
+    },heehee_signer_seeds), lamport_ss)?;
+    msg!("Initializing token account");
+    let init_ix = spl_token::instruction::initialize_account(
+        &anchor_spl::token::ID,
+        escrow_in_ata.key,
+        ctx.accounts.input_mint.to_account_info().key,
+        ctx.accounts.escrow.to_account_info().key,
     )?;
 
+    invoke_signed(
+        &init_ix,
+        &[
+            escrow_in_ata.clone(),
+            ctx.accounts.input_mint.to_account_info().clone(),
+            ctx.accounts.escrow.to_account_info().clone(),
+            ctx.accounts.system_program.to_account_info().clone(),
+            ctx.accounts.rent.to_account_info().clone(),
+        ],
+        signer_seeds,
+    )?;
+
+    msg!("Syncing native account");
+    let sync_native_ix = spl_token::instruction::sync_native(
+        &anchor_spl::token::ID,
+        escrow_in_ata.key,
+    )?;
+
+    invoke_signed(
+        &sync_native_ix,
+        &[escrow_in_ata.clone(), ctx.accounts.token_program.to_account_info().clone(), ctx.accounts.system_program.to_account_info().clone()],
+        signer_seeds,
+    )?;
+
+    msg!("Calculating DCA parameters");
+    let in_amount_per_cycle = lamport_ss
+        .checked_div(100)
+        .ok_or(ErrorCode::InvalidProgramExecutable)?;  // Safe division
+    let cycle_frequency = 60 ; // hour in seconds
+
+    msg!("Will DCA {} lamports per cycle every {} seconds", in_amount_per_cycle, cycle_frequency);
+
+    msg!("Initializing escrow account");
     let escrow = &mut ctx.accounts.escrow;
     escrow.idx = application_idx;
     escrow.user = *ctx.accounts.user.key;
     escrow.dca = ctx.accounts.jup_dca.key();
     escrow.input_mint = ctx.accounts.input_mint.key();
     escrow.output_mint = ctx.accounts.output_mint.key();
-    escrow.input_amount = in_amount;
+    escrow.input_amount = lamport_ss;
     escrow.output_amount = 0;
     escrow.airdrop_amount = 0;
     escrow.completed = false;
     escrow.airdropped = false;
     escrow.bump = *ctx.bumps.get("escrow").unwrap();
+    msg!("Escrow initialized with idx {} for user {}", application_idx, escrow.user);
 
-    msg!("Construct open dca ctx");
+    msg!("Constructing open DCA context");
     let idx_bytes = ctx.accounts.escrow.idx.to_le_bytes();
     let signer_seeds: &[&[&[u8]]] = &[escrow_seeds!(ctx.accounts.escrow, idx_bytes)];
     let open_dca_accounts = cpi::accounts::OpenDcaV2 {
@@ -131,18 +219,18 @@ pub fn setup_dca(
         signer_seeds,
     );
 
-    msg!("CPI call to open dca");
+    msg!("Making CPI call to open DCA with {} total lamports, {} per cycle", lamport_ss, in_amount_per_cycle);
     cpi::open_dca_v2(
         cpi_ctx,
         application_idx,
-        in_amount,
+        lamport_ss- min_rent- min_rent,
         in_amount_per_cycle,
         cycle_frequency,
-        min_out_amount,
-        max_out_amount,
+        None,
+        None,
         start_at,
     )?;
-    msg!("Success");
+    msg!("DCA setup completed successfully!");
 
     Ok(())
 }

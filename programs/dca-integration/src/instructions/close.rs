@@ -22,14 +22,6 @@ pub struct Close<'info> {
     user: Signer<'info>,
 
     #[account(
-      init_if_needed,
-      payer=user,
-      associated_token::authority=user,
-      associated_token::mint=output_mint,
-    )]
-    user_token_account: Box<Account<'info, TokenAccount>>,
-
-    #[account(
       mut,
       constraint=escrow.user==user.key(),
     )]
@@ -90,43 +82,32 @@ pub fn close(ctx: Context<Close>) -> Result<()> {
     let idx_bytes = ctx.accounts.escrow.idx.to_le_bytes();
     let signer_seeds: &[&[&[u8]]] = &[escrow_seeds!(ctx.accounts.escrow, idx_bytes)];
 
-    // transfer out tokens to user
-    // if it's native SOL, it will get returned to user when the account is closed
-    if ctx.accounts.escrow_out_ata.amount > 0 {
-        anchor_spl::token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.escrow_out_ata.to_account_info(),
-                    to: ctx.accounts.user_token_account.to_account_info(),
-                    authority: ctx.accounts.escrow.to_account_info(),
-                },
-                signer_seeds,
-            ),
-            ctx.accounts.escrow_out_ata.amount,
-        )?;
-    }
+    // Burn tokens instead of closing accounts
+    anchor_spl::token::burn(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Burn {
+                mint: ctx.accounts.input_mint.to_account_info(),
+                from: ctx.accounts.escrow_in_ata.to_account_info(),
+                authority: ctx.accounts.escrow.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        ctx.accounts.escrow_in_ata.amount,
+    )?;
 
-    // close ATAs
-    anchor_spl::token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        anchor_spl::token::CloseAccount {
-            account: ctx.accounts.escrow_in_ata.to_account_info(),
-            destination: ctx.accounts.user.to_account_info(),
-            authority: ctx.accounts.escrow.to_account_info(),
-        },
-        signer_seeds,
-    ))?;
-
-    anchor_spl::token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        anchor_spl::token::CloseAccount {
-            account: ctx.accounts.escrow_out_ata.to_account_info(),
-            destination: ctx.accounts.user.to_account_info(),
-            authority: ctx.accounts.escrow.to_account_info(),
-        },
-        signer_seeds,
-    ))?;
+    anchor_spl::token::burn(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Burn {
+                mint: ctx.accounts.output_mint.to_account_info(),
+                from: ctx.accounts.escrow_out_ata.to_account_info(),
+                authority: ctx.accounts.escrow.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        ctx.accounts.escrow_out_ata.amount,
+    )?;
 
     Ok(())
 }

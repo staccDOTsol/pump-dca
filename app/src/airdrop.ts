@@ -13,7 +13,7 @@ const RPC = process.env.RPC || 'https://api.devnet.solana.com';
 const connection = new Connection(RPC);
 
 const escrowProgramId = new PublicKey(
-  '5mrhiqFFXyfJMzAJc5vsEQ4cABRhfsP7MgSVgGQjfcrR',
+  '3nD2C2UJCUa8WX9UtoDEAycFTXNS86dWVw4qRy2raKRD',
 );
 const provider = new AnchorProvider(
   connection,
